@@ -1,38 +1,65 @@
 { createHash } = require 'crypto'
 { isFunction } = require 'lodash'
 
+util = require 'util'
+debug = require('debug')('loopback:mixins:cache')
+
 module.exports = (Model, options) ->
 
-  Model.on 'attached', (server) ->
+  Model.observe 'before execute', (ctx, next) ->
+    debug 'cache before execute', ctx
 
-    Model.beforeRemote '**', (context, unused, cb) ->
-      { method, args, methodString } = context
-      { cache } = Model.app
+    { req, model } = ctx
+    { params, command } = req
+    { where, data, options } = params
 
-      key = methodString
+    { cache } = Model.app
 
-      switch method.accessType
-        when 'READ'
-          if args?.filter?.where
-            key += JSON.stringify args.filter.where
+    if command in [ 'find', 'findOne', 'findById' ]
+      key = model + ':' + JSON.stringify params or {}
 
-      context.keyCache = createHash 'md5'
+      key = ctx.hookState.key = createHash 'md5'
         .update key
         .digest 'hex'
 
-      cache.get context, cb
+      debug 'getting cache with', util.inspect(ctx, false, null)
 
-      return
+      cache.get key, (err, result) ->
+        if err
+          return next()
 
-    Model.afterRemote '**', (context, unused, cb) ->
-      cb()
+        if not result
+          return next null, ctx
 
-      { cache } = Model.app
+        ctx.hookState.cached = not not result
+        ctx.res = result
 
-      switch context.method.accessType
-        when 'READ'
-          cache.set context.keyCache, context.result
+        debug 'found cached result', result
+
+        next()
+
+    else next()
 
     return
 
+  Model.observe 'after execute', (ctx, next) ->
+    debug 'cache after execute', ctx
+
+    next()
+
+    if ctx.hookState.cached
+      return
+
+    { req, res, model, hookState } = ctx
+    { params, command } = req
+    { where, data, options } = params
+    { cache } = Model.app
+    { key } = hookState
+
+    if command in [ 'find', 'findOne', 'findById' ]
+      debug 'setting cache with', ctx
+
+      cache.set key, res
+
   return
+
